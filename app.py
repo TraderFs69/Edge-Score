@@ -83,7 +83,7 @@ edge_spy = edge_score(spy_df).iloc[-1]
 # ======================================================
 # VIX FILTER
 # ======================================================
-vix_df = get_data("I:VIX", 1, "day")
+vix_df = get_data("VIXY", 1, "day")
 vix_z = (vix_df["close"].iloc[-1] - vix_df["close"].mean()) / vix_df["close"].std()
 vix_filter = 1 - np.tanh(vix_z)
 
