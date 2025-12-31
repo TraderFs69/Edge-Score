@@ -30,14 +30,33 @@ st.caption(f"📦 {len(TICKERS)} tickers S&P 500 chargés")
 # ======================================================
 # DATA FETCH
 # ======================================================
+from datetime import datetime, timedelta
+
 @st.cache_data
 def get_data(ticker, mult, span):
-    bars = client.get_aggs(ticker, mult, span, limit=LOOKBACK)
+    to_date = datetime.utcnow()
+    
+    # Ajustement large pour être sûr d’avoir assez de données
+    if span == "day":
+        from_date = to_date - timedelta(days=LOOKBACK * 2)
+    else:
+        from_date = to_date - timedelta(days=LOOKBACK * 3)
+
+    bars = client.get_aggs(
+        ticker=ticker,
+        multiplier=mult,
+        timespan=span,
+        from_=from_date.strftime("%Y-%m-%d"),
+        to=to_date.strftime("%Y-%m-%d"),
+        limit=LOOKBACK
+    )
+
     df = pd.DataFrame([{
         "close": b.close,
         "high": b.high,
         "low": b.low
     } for b in bars])
+
     return df
 
 # ======================================================
