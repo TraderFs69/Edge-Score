@@ -31,14 +31,13 @@ def load_sp500():
 
 sp500 = load_sp500()
 TICKERS = sp500["Symbol"].tolist()
-
 st.caption(f"📦 {len(TICKERS)} tickers S&P 500 chargés")
 
 # ======================================================
-# DATA FETCH (POLYGON SAFE)
+# POLYGON DATA (CACHED)
 # ======================================================
 @st.cache_data
-def get_data(ticker, mult, span):
+def get_data_cached(ticker, mult, span):
     to_date = datetime.utcnow()
     from_date = to_date - timedelta(days=LOOKBACK * 3)
 
@@ -51,13 +50,11 @@ def get_data(ticker, mult, span):
         limit=LOOKBACK
     )
 
-    df = pd.DataFrame([{
+    return pd.DataFrame([{
         "close": b.close,
         "high": b.high,
         "low": b.low
     } for b in bars])
-
-    return df
 
 # ======================================================
 # EDGE SCORE
@@ -75,67 +72,71 @@ def edge_score(df):
     return np.tanh(z1 + z2) * np.tanh(z3)
 
 # ======================================================
+# PRELOAD DATA (PERFORMANCE KEY)
+# ======================================================
+data_1d, data_4h = {}, {}
+
+with st.spinner("Chargement des données S&P 500 (premier lancement plus lent)…"):
+    for t in TICKERS:
+        try:
+            d1 = get_data_cached(t, 1, "day")
+            h4 = get_data_cached(t, 4, "hour")
+
+            if len(d1) >= 60 and len(h4) >= 30:
+                data_1d[t] = d1
+                data_4h[t] = h4
+        except:
+            continue
+
+# ======================================================
 # MARKET REGIME
 # ======================================================
-spy_df = get_data("SPY", 1, "day")
+spy_df = get_data_cached("SPY", 1, "day")
 edge_spy = edge_score(spy_df).iloc[-1]
 
-vix_df = get_data("VIXY", 1, "day")
+vix_df = get_data_cached("VIXY", 1, "day")
 vix_z = (vix_df["close"].iloc[-1] - vix_df["close"].mean()) / vix_df["close"].std()
 vix_filter = 1 - np.tanh(vix_z)
 
 # ======================================================
-# BREADTH DAILY (OFFICIEL SP500)
+# BREADTH DAILY (OFFICIEL)
 # ======================================================
-@st.cache_data
-def compute_breadth(tickers):
-    hits, valid = 0, 0
-    for t in tickers:
-        try:
-            df = get_data(t, 1, "day")
-            ema = ta.trend.ema_indicator(df["close"], 50)
-            if df["close"].iloc[-1] > ema.iloc[-1]:
-                hits += 1
-            valid += 1
-        except:
-            continue
-    return hits / valid if valid > 0 else 0
+hits = 0
+for t, df in data_1d.items():
+    ema = ta.trend.ema_indicator(df["close"], 50)
+    if df["close"].iloc[-1] > ema.iloc[-1]:
+        hits += 1
 
-BREADTH = compute_breadth(TICKERS)
+BREADTH = hits / len(data_1d) if data_1d else 0
 
 LONG_OK  = edge_spy > 0.3 and vix_filter > 0.3 and BREADTH > 0.5
 SHORT_OK = edge_spy < -0.3 and vix_filter > 0.3 and BREADTH < 0.5
 
 # ======================================================
-# SCAN 500 STOCKS (SWING)
+# SCAN SWING (FAST)
 # ======================================================
 rows = []
 
-for t in TICKERS:
+for t in data_1d:
     try:
-        d1 = get_data(t, 1, "day")
-        h4 = get_data(t, 4, "hour")
+        e1d = edge_score(data_1d[t]).iloc[-1]
+        e4h = edge_score(data_4h[t]).iloc[-1]
 
-        if len(h4) < 60:
-            continue
-
-        e1d = edge_score(d1).iloc[-1]
-        e4h = edge_score(h4).iloc[-1]
-
-        if np.isnan(e1d) or np.isnan(e4h):
-            continue
-
-        rows.append({
-            "Ticker": t,
-            "Edge 1D": e1d,
-            "Edge 4H": e4h
-        })
+        if not np.isnan(e1d) and not np.isnan(e4h):
+            rows.append({
+                "Ticker": t,
+                "Edge 1D": e1d,
+                "Edge 4H": e4h
+            })
     except:
         continue
 
 scan_df = pd.DataFrame(rows)
 
-# Ranking relatif
+if scan_df.empty:
+    st.warning("Aucune action éligible — marché très neutre ou données insuffisantes.")
+    st.stop()
+
 scan_df["Rank_4H"] = scan_df["Edge 4H"].rank(pct=True)
 
 # ======================================================
@@ -153,13 +154,12 @@ if MODE == "STRICT":
         (scan_df["Edge 1D"] < -0.3) &
         (scan_df["Edge 4H"] < -0.25)
     ].sort_values("Edge 4H").head(10)
-
-else:  # RELATIF
+else:
     top_long = scan_df.sort_values("Rank_4H", ascending=False).head(10)
     top_short = scan_df.sort_values("Rank_4H").head(10)
 
 # ======================================================
-# SECTOR HEATMAP (MEAN EDGE 4H)
+# SECTOR HEATMAP (ROBUSTE)
 # ======================================================
 sector_scores = {}
 
@@ -168,18 +168,13 @@ for sector in sp500["Sector"].unique():
     edges = []
 
     for t in tickers:
-        try:
-            h4 = get_data(t, 4, "hour")
-            if h4 is None or len(h4) < 60:
-                continue
-
-            e = edge_score(h4).iloc[-1]
-            if np.isnan(e):
-                continue
-
-            edges.append(e)
-        except:
+        h4 = data_4h.get(t)
+        if h4 is None:
             continue
+
+        e = edge_score(h4).iloc[-1]
+        if not np.isnan(e):
+            edges.append(e)
 
     if len(edges) >= 5:
         sector_scores[sector] = np.mean(edges)
