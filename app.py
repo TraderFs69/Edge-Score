@@ -21,7 +21,7 @@ USER_MODE = st.radio(
 )
 
 # ======================================================
-# LOAD SP500 + SECTORS
+# LOAD SP500
 # ======================================================
 @st.cache_data
 def load_sp500():
@@ -31,13 +31,14 @@ def load_sp500():
 
 sp500 = load_sp500()
 TICKERS = sp500["Symbol"].tolist()
-st.caption(f"📦 {len(TICKERS)} tickers S&P 500 chargés")
+
+st.caption(f"📦 Univers : {len(TICKERS)} actions (S&P 500)")
 
 # ======================================================
-# POLYGON DATA (CACHED)
+# POLYGON DATA (SAFE + CACHE)
 # ======================================================
 @st.cache_data
-def get_data_cached(ticker, mult, span):
+def get_data(ticker, mult, span):
     to_date = datetime.utcnow()
     from_date = to_date - timedelta(days=LOOKBACK * 3)
 
@@ -50,11 +51,9 @@ def get_data_cached(ticker, mult, span):
         limit=LOOKBACK
     )
 
-    return pd.DataFrame([{
-        "close": b.close,
-        "high": b.high,
-        "low": b.low
-    } for b in bars])
+    return pd.DataFrame(
+        [{"close": b.close, "high": b.high, "low": b.low} for b in bars]
+    )
 
 # ======================================================
 # EDGE SCORE
@@ -72,17 +71,16 @@ def edge_score(df):
     return np.tanh(z1 + z2) * np.tanh(z3)
 
 # ======================================================
-# PRELOAD DATA (OPTIMISÉ)
+# PRELOAD DATA (ASSOUPLI)
 # ======================================================
 data_1d, data_4h = {}, {}
 
-with st.spinner("Chargement des données S&P 500 (premier lancement plus lent)…"):
+with st.spinner("Chargement des données (premier lancement plus lent)…"):
     for t in TICKERS:
         try:
-            d1 = get_data_cached(t, 1, "day")
-            h4 = get_data_cached(t, 4, "hour")
+            d1 = get_data(t, 1, "day")
+            h4 = get_data(t, 4, "hour")
 
-            # ✅ Correction 1 : contraintes assouplies
             if len(d1) >= 40 and len(h4) >= 20:
                 data_1d[t] = d1
                 data_4h[t] = h4
@@ -90,18 +88,15 @@ with st.spinner("Chargement des données S&P 500 (premier lancement plus lent)�
             continue
 
 # ======================================================
-# MARKET REGIME
+# MARKET SCORES (AFFICHÉS)
 # ======================================================
-spy_df = get_data_cached("SPY", 1, "day")
+spy_df = get_data("SPY", 1, "day")
 edge_spy = edge_score(spy_df).iloc[-1]
 
-vix_df = get_data_cached("VIXY", 1, "day")
+vix_df = get_data("VIXY", 1, "day")
 vix_z = (vix_df["close"].iloc[-1] - vix_df["close"].mean()) / vix_df["close"].std()
 vix_filter = 1 - np.tanh(vix_z)
 
-# ======================================================
-# BREADTH DAILY
-# ======================================================
 hits = 0
 for df in data_1d.values():
     ema = ta.trend.ema_indicator(df["close"], 50)
@@ -114,7 +109,7 @@ LONG_OK  = edge_spy > 0.3 and vix_filter > 0.3 and BREADTH > 0.5
 SHORT_OK = edge_spy < -0.3 and vix_filter > 0.3 and BREADTH < 0.5
 
 # ======================================================
-# SCAN SWING
+# SCAN
 # ======================================================
 rows = []
 
@@ -123,38 +118,36 @@ for t in data_1d:
         e1d = edge_score(data_1d[t]).iloc[-1]
         e4h = edge_score(data_4h[t]).iloc[-1]
 
-        if not np.isnan(e1d) and not np.isnan(e4h):
-            rows.append({
-                "Ticker": t,
-                "Edge 1D": e1d,
-                "Edge 4H": e4h
-            })
+        rows.append({
+            "Ticker": t,
+            "Edge 1D": e1d,
+            "Edge 4H": e4h
+        })
     except:
         continue
 
 scan_df = pd.DataFrame(rows)
 
 # ======================================================
-# Correction 2 : fallback automatique
+# BULLETPROOF RANKING
+# ======================================================
+if "Edge 4H" in scan_df.columns and not scan_df.empty:
+    scan_df["Rank_4H"] = scan_df["Edge 4H"].rank(pct=True)
+else:
+    scan_df["Rank_4H"] = np.nan
+
+# ======================================================
+# MODE EFFECTIF
 # ======================================================
 MODE = USER_MODE
-if scan_df.empty:
-    st.warning(
-        "Marché très neutre ou données partielles. "
-        "Passage automatique en mode RELATIF (observation)."
-    )
+if scan_df["Rank_4H"].notna().sum() < 10:
+    st.warning("Peu de données exploitables → passage automatique en mode RELATIF")
     MODE = "RELATIF"
 
 # ======================================================
-# Ranking relatif
+# TOP 10
 # ======================================================
-if not scan_df.empty:
-    scan_df["Rank_4H"] = scan_df["Edge 4H"].rank(pct=True)
-
-# ======================================================
-# TOP 10 LOGIC
-# ======================================================
-if MODE == "STRICT" and not scan_df.empty:
+if MODE == "STRICT":
     top_long = scan_df[
         LONG_OK &
         (scan_df["Edge 1D"] > 0.3) &
@@ -171,15 +164,14 @@ else:
     top_short = scan_df.sort_values("Rank_4H").head(10)
 
 # ======================================================
-# SECTOR HEATMAP (ROBUSTE)
+# SECTOR HEATMAP
 # ======================================================
 sector_scores = {}
 
 for sector in sp500["Sector"].unique():
-    tickers = sp500[sp500["Sector"] == sector]["Symbol"]
     edges = []
 
-    for t in tickers:
+    for t in sp500[sp500["Sector"] == sector]["Symbol"]:
         h4 = data_4h.get(t)
         if h4 is None:
             continue
@@ -197,22 +189,20 @@ sector_df = pd.DataFrame.from_dict(
 
 if not sector_df.empty:
     sector_df["Rank"] = sector_df["Mean Edge 4H"].rank(pct=True)
-    sector_df = sector_df.sort_values("Mean Edge 4H", ascending=False)
 
 # ======================================================
-# DISPLAY
+# DISPLAY — SCORES COMME TANTÔT
 # ======================================================
-st.subheader("🌍 Régime Marché")
-c1, c2, c3 = st.columns(3)
+st.subheader("🌍 Scores de Marché")
+c1, c2, c3, c4 = st.columns(4)
 c1.metric("SPY Edge", round(edge_spy, 2))
-c2.metric("VIX Filter (VIXY)", round(vix_filter, 2))
-c3.metric("Breadth S&P 500 (1D)", f"{BREADTH*100:.1f}%")
+c2.metric("VIX Filter", round(vix_filter, 2))
+c3.metric("Breadth (1D)", f"{BREADTH*100:.1f}%")
+c4.metric("Mode Actif", MODE)
 
-# ✅ Correction 3 : diagnostic clair
 st.caption(
     f"🔍 {len(scan_df)} actions analysées | "
-    f"Mode actif : {MODE} | "
-    f"Breadth : {BREADTH*100:.1f}%"
+    f"LONG_OK={LONG_OK} | SHORT_OK={SHORT_OK}"
 )
 
 st.subheader(f"🟢 TOP 10 LONG — {MODE}")
@@ -222,4 +212,4 @@ st.subheader(f"🔴 TOP 10 SHORT — {MODE}")
 st.dataframe(top_short, use_container_width=True)
 
 st.subheader("🧭 Heatmap Sectorielle — Mean Edge 4H")
-st.dataframe(sector_df, use_container_width=True)
+st.dataframe(sector_df.sort_values("Mean Edge 4H", ascending=False), use_container_width=True)
